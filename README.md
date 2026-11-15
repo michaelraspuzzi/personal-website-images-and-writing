@@ -21,6 +21,9 @@ template, "Sam Example", is made up.
   follows the cursor.
 - **Outline ticks.** Little marks on the left show each open section; hover one
   to preview its image, click to jump back.
+- **Shareable section links.** Each section has its own link (`/#studio`).
+  Send one and it opens at the start of that section; the back button or a
+  reload brings readers back to where they were.
 - **Contact button.** Email, a booking link, or a [Tally](https://tally.so)
   popup form.
 - **Readable by search and AI engines.** The full text is in the HTML even

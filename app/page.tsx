@@ -22,6 +22,32 @@ import { homeJsonLd, ld } from "@/lib/seo";
 
 const byId = Object.fromEntries(sections.map((s) => [s.id, s]));
 
+// Section links: the URL hash names the section in view (/#studios), and the
+// open sections are remembered for the tab. replaceState, so reading the
+// essay doesn't fill the back button with one entry per section.
+const STORE = "home:opened";
+const readHash = () => {
+  const id = decodeURIComponent(window.location.hash.slice(1));
+  return byId[id] ? id : null;
+};
+const setHash = (id: string | null) => {
+  const url = id ? `#${id}` : window.location.pathname + window.location.search;
+  if ((id ? `#${id}` : "") !== window.location.hash) history.replaceState(history.state, "", url);
+};
+const readOpened = (): string[] => {
+  try {
+    const ids = JSON.parse(sessionStorage.getItem(STORE) ?? "[]");
+    return Array.isArray(ids) ? ids.filter((id) => byId[id]) : [];
+  } catch {
+    return [];
+  }
+};
+const saveOpened = (ids: Set<string>) => {
+  try {
+    sessionStorage.setItem(STORE, JSON.stringify([...ids]));
+  } catch {}
+};
+
 const textCls = "text-[17px] md:text-[22px] leading-[1.6] tracking-tight mb-5";
 const linkCls = "underline underline-offset-4 hover:text-gray-500 transition-colors";
 const Arrow = () => <span className="text-[10px] align-super ml-0.5">↗</span>;
@@ -166,15 +192,16 @@ export default function Home() {
   // One eased scroll we control (native smooth scroll varies by browser and
   // can't be timed with the text fade). Any wheel/touch/key input cancels it.
   const tween = useRef(0);
-  const glide = useCallback((to: number) => {
+  const glide = useCallback((to: number, instant = false) => {
     cancelAnimationFrame(tween.current);
     const from = window.scrollY;
     const dist = to - from;
     if (Math.abs(dist) < 1) return;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduce = instant || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const dur = reduce ? 0 : Math.min(1400, 850 + Math.abs(dist) * 0.3);
-    const t0 = performance.now();
     lockUntil.current = Date.now() + dur + 120;
+    if (!dur) return window.scrollTo(0, to);
+    const t0 = performance.now();
     const ease = (t: number) => (1 - Math.cos(Math.PI * t)) / 2; // ease-in-out sine
     const step = (now: number) => {
       const t = dur ? Math.min(1, (now - t0) / dur) : 1;
@@ -202,7 +229,7 @@ export default function Home() {
   // Put the section's first line right under the image. If the page is too
   // short to scroll that far, grow a spacer just enough to allow it.
   const scrollToSection = useCallback(
-    (id: string) => {
+    (id: string, instant = false) => {
       const el = document.querySelector<HTMLElement>(`[data-section="${id}"]`);
       const sp = spacer.current;
       if (!el || !sp) return;
@@ -212,29 +239,86 @@ export default function Home() {
       const target = top - headerBottom() - GAP;
       const need = target + window.innerHeight - contentEnd;
       sp.style.height = `${Math.max(0, Math.ceil(need))}px`;
-      glide(target);
+      glide(target, instant);
     },
     [glide],
   );
 
   // A newly opened section is measured and scrolled to in the same frame it
   // mounts, before paint, so the click moves the page immediately.
-  const pending = useRef<string | null>(null);
+  const pending = useRef<{ id: string; instant: boolean } | null>(null);
   useLayoutEffect(() => {
     if (!pending.current) return;
-    const id = pending.current;
+    const { id, instant } = pending.current;
     pending.current = null;
-    scrollToSection(id);
+    scrollToSection(id, instant);
+    if (!instant) return;
+    // On page load the browser/Next can reset scroll after hydration, so jump
+    // again once things settle, unless the reader has already scrolled.
+    let moved = false;
+    const stop = () => (moved = true);
+    const opts = { passive: true, once: true } as const;
+    window.addEventListener("wheel", stop, opts);
+    window.addEventListener("touchstart", stop, opts);
+    window.addEventListener("keydown", stop, { once: true });
+    [60, 250, 600].forEach((ms) =>
+      setTimeout(() => {
+        if (moved) return;
+        lockUntil.current = Date.now() + 200;
+        scrollToSection(id, true);
+      }, ms),
+    );
   }, [opened, scrollToSection]);
 
   const open = (id: string) => {
     if (!byId[id]) return console.warn(`No section with id "${id}" in content/site.ts`);
     setActive(id);
     setThumb(null);
+    setHash(id);
     if (opened.has(id)) return scrollToSection(id);
-    pending.current = id;
-    setOpened((prev) => new Set(prev).add(id));
+    pending.current = { id, instant: false };
+    setOpened((prev) => {
+      const next = new Set(prev).add(id);
+      saveOpened(next);
+      return next;
+    });
   };
+
+  // Every section has its own link (/#studios). Opening one puts it in the
+  // URL, so it can be shared, and coming back (back button, reload, reopened
+  // tab) lands at the start of that section. The list of sections the reader
+  // had open is kept for the tab in sessionStorage: a few bytes, gone when
+  // the tab closes. A shared link opens just its own section.
+  useLayoutEffect(() => {
+    history.scrollRestoration = "manual";
+    const restore = () => {
+      const id = readHash();
+      const next = new Set(readOpened());
+      if (id) next.add(id);
+      if (!next.size) return;
+      setOpened(next);
+      saveOpened(next);
+      if (id) {
+        setActive(id);
+        lockUntil.current = Date.now() + 300;
+        pending.current = { id, instant: true };
+      }
+    };
+    restore();
+    const onHash = () => {
+      const id = readHash();
+      if (!id) return;
+      setActive(id);
+      pending.current = { id, instant: false };
+      setOpened((prev) => {
+        const next = new Set(prev).add(id);
+        saveOpened(next);
+        return next;
+      });
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   // The image follows whichever open section sits under the sticky image.
   useEffect(() => {
@@ -243,7 +327,10 @@ export default function Home() {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         if (Date.now() < lockUntil.current) return;
-        if (window.scrollY < 24) return setActive(null);
+        if (window.scrollY < 24) {
+          setHash(null);
+          return setActive(null);
+        }
         const line = headerBottom() + (window.innerHeight - headerBottom()) * 0.35;
         let current: string | null = null;
         const all = document.querySelectorAll<HTMLElement>("[data-section]");
@@ -254,6 +341,7 @@ export default function Home() {
         const atBottom =
           window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
         if (atBottom && all.length) current = all[all.length - 1].dataset.section!;
+        setHash(current);
         setActive(current);
       });
     };
@@ -380,6 +468,7 @@ export default function Home() {
                 onClick={() => {
                   setTick(null);
                   if (s.id) return open(s.id);
+                  setHash(null);
                   setActive(null);
                   glide(0);
                 }}
